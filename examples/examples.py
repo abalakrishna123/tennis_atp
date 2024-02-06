@@ -19,8 +19,6 @@ import json
 import numpy as np
 import pandas as pd
 import math
-from pandas.core.categorical import Categorical
-from spyderlib.widgets.externalshell import namespacebrowser
 
 
 
@@ -62,6 +60,7 @@ def readATPMatchesParseTime(dirname):
                          encoding = "ISO-8859-1",
                          date_parser=lambda t:parse(t))
         container.append(df)
+    print("CONTAINER: ", container)
     matches = pd.concat(container)
     return matches
 
@@ -179,23 +178,102 @@ def getRankForPreviousMonday(tdate,playername):
 def matchesPerCountryAndRound(matches):
     """find single matches based on country and round"""
     matches = matches[(matches['round']=='F') & (matches['winner_ioc'] == 'AUT') & (matches['loser_ioc'] == 'AUT')]
-    matches = matches.sort(['tourney_date'], ascending=False)
+    matches = matches.sort_values(['tourney_date'], ascending=False)
     #print matches.to_string(columns=['tourney_name','tourney_date','winner_name', 'loser_name'])
     print(matches[['tourney_name','tourney_date','winner_name', 'loser_name']].to_csv(sys.stdout,index=False))
     
 def bestLLinGrandSlams(matches):
-    """looking for LLs who got deepes int grand slam draws starting from R32"""
+    """looking for LLs who got deepest in grand slam draws starting from R32"""
     matches = matches[((matches['round']=='R32') | (matches['round']=='R16') | (matches['round']=='QF') | (matches['round']=='SF') | (matches['round']=='F')) & (matches['tourney_level'] == 'G') & (matches['loser_entry'] == 'LL')]
-    matches = matches.sort(['tourney_date'], ascending=False)
+    matches = matches.sort_values(['tourney_date'], ascending=False)
     print(matches[['tourney_name','tourney_date','round','winner_name','winner_entry', 'loser_name', 'loser_entry']].to_csv(sys.stdout,index=False))    
   
 def numberOfSetsLongerThan(matches,sets,minutes):
     """find matches longer than 'minutes' with 'sets' number of played sets"""
     matches['score'].astype('str')
     matches = matches[(matches['minutes'] > minutes) & (matches['score'].str.count('-') == sets)]
-    matches = matches.sort(['minutes'], ascending=False)
-    print(matches[['minutes','score','tourney_name','tourney_date','round','winner_name', 'loser_name']].to_csv(sys.stdout,index=False))    
-    
+    matches = matches.sort_values(['minutes'], ascending=False)
+    print(matches[['minutes','score','tourney_name','tourney_date','round','winner_name', 'loser_name']].to_csv(sys.stdout,index=False))   
+
+def get_slams_with_diff_bo3_winners(matches):
+    # Go through each tournament one by one and check if winner
+    # would have lost had the format been Bo3
+    matches = matches[(matches['tourney_level'] == 'G')]
+    matches['year'] = matches['tourney_date'].astype(str)
+    matches['year'] = matches['year'].str[:4]
+    num_tourneys = 0
+    num_tourneys_with_winner_flip = 0
+
+    # # Go thru each year
+    for year in range(1968, 2024):
+        # Go thru each slam that year
+        for tourney in ["Australian Open", "Roland Garros", "Wimbledon", "Us Open"]:
+            tourney_matches = matches[(matches['tourney_level'] == 'G') 
+                                    & (matches['year']==str(year))
+                                    & (matches['tourney_name']==tourney)]
+            if not tourney_matches.empty:
+                # Check who won the final
+                tourney_winner = tourney_matches[(tourney_matches['round'] == 'F')]['winner_name'].values[0]
+                # Check all that players matches and see if they would have lost any of their matches
+                # were the tournament Bo3
+                winner_matches = tourney_matches[(tourney_matches['winner_name'] == tourney_winner)]
+                winner_flips = winner_matches.apply(is_bo3_winner_different, axis=1).tolist()
+                # Print out which match would have taken out the eventual winner
+                columns_to_print = ['tourney_name','tourney_date','round','winner_name','loser_name', 'score']
+                for i, (index, row) in enumerate(winner_matches.iterrows()):
+                    if winner_flips[i]:
+                        row_values = [row[column] for column in columns_to_print]
+                        num_tourneys_with_winner_flip += 1
+                        print(row_values) 
+                        break
+                num_tourneys += 1
+    perc_flip = 100 * num_tourneys_with_winner_flip/num_tourneys
+    print("Percent of GS tournaments with different winners: ", perc_flip)
+
+def get_percent_of_grand_slam_matches_with_diff_bo3_winners(matches):
+    matches = matches[(matches['tourney_level'] == 'G')]
+    matches["winner_flips"] = matches.apply(is_bo3_winner_different, axis=1)
+    matches_with_winner_flips = matches[matches['winner_flips'] == True]
+    num_matches = len(matches)
+    num_matches_with_winner_flip = len(matches_with_winner_flips)
+    perc_flip = 100 * num_matches_with_winner_flip / num_matches
+    print("Percent of GS matches with different winners: ", perc_flip)
+    return num_matches_with_winner_flip / num_matches
+
+def is_bo3_winner_different(winner_match):
+    score_str = winner_match['score']
+    # Handle cases where no score was actually recorded
+    if not isinstance(score_str, str):
+        return False
+
+    if "W/O" in score_str:
+        return False 
+    set_scores = score_str.split(" ")
+    set_elements = [[s.split('(')[0].split('?')[0] for s in set_score.split('-')] for set_score in set_scores]
+
+    # TODO(Ashwin): Think more about how to handle retirements and defaults correctly, right now ignoring them
+    # and any other matches with strange annotations in-lieu of actual set scores
+    for s in set_elements:
+        if len(s) != 2:
+            return False
+
+    # False is P1, True is P2
+    set_winners = [int(s[0]) > int(s[1]) for s in set_elements]
+
+    # Check if it is actually a Bo3 match (this sometimes happened in random rounds
+    # in early grand slams)
+    if len(set_winners) <= 3 and sum(set_winners) != 3:
+        return False
+
+    # If P1 won first 2/3 sets, but didn't win 3/5 sets
+    if sum(set_winners[:3]) == 2 and sum(set_winners) == 2:
+        return True
+    # If P1 won first 1/3 sets, but then won 3/5 sets
+    elif sum(set_winners[:3]) == 1 and sum(set_winners) == 3:
+        return True 
+    else:
+        return False
+   
 def geth2hforplayer(matches,name):
     """get all head-to-heads of the player"""
     matches = matches[(matches['winner_name'] == name) | (matches['loser_name'] == name)]
@@ -257,7 +335,7 @@ def getWinLossByPlayer(qmatches, activeplayers, active):
         scores = scores[(scores.index.isin(activeplayerslist[:MAX_RANK]))]
         scores.index = pd.CategoricalIndex(scores.index, categories=activeplayerslist, ordered=True)
         #toggle sorting by ranking in next line
-        scores = scores.sort_index()
+        scores = scores.sort_values_values_index()
 
 
     #todo: add titles and finals
@@ -277,7 +355,7 @@ def getWinLossByPlayer(qmatches, activeplayers, active):
     scores['rets'] = scores['rets'].astype('int')  
     
     #sort by wins
-    scores = scores.sort(['titles'], ascending=False)
+    scores = scores.sort_values_values(['titles'], ascending=False)
     print(scores.to_csv(sys.stdout,index=True))
     
 def getRets(matches):
@@ -313,7 +391,7 @@ def findLLQmultipleMatchesAtSameTournament(atpmatches,qmatches):
                 resultlist.append(second_case[(second_case['loser_name'] == second_case_results['loser_name'])])
     
            
-    result = pd.concat(resultlist).sort(['tourney_date'], ascending=False)
+    result = pd.concat(resultlist).sort_values_values(['tourney_date'], ascending=False)
     print(result[['tourney_name','tourney_date','round','winner_name','winner_entry', 'loser_name','loser_entry']].to_csv(sys.stdout,index=False))
     
 def getActivePlayers(dirname):
@@ -356,7 +434,7 @@ def qualifierSeeded(atpmatches):
     frames = [lmatches, wmatches]
     result = pd.concat(frames)
     result['seed'] = result['seed'].astype('int')
-    result = result.sort(['tourney_date','tourney_name'], ascending=[True,True])
+    result = result.sort_values(['tourney_date','tourney_name'], ascending=[True,True])
     print(result[['tourney_date','tourney_name','name','entry','seed','round']].to_csv(sys.stdout,index=False))
     
 def getDictEightSeedRankperTourney(matches):
@@ -409,7 +487,7 @@ def highRankedQLosers(qmatches,atpmatches):
     merged = rankdf.merge(qmatches, left_on=['year', 'tourney_name'], right_on=['date4', 'tourney_name'])
     merged = merged[(merged['loser_rank'] < merged['8seedrank'])]
     
-    print(merged[['tourney_id','tourney_date','tourney_name','loser_name','loser_rank', '8seedrank']].sort(['tourney_date'], ascending=[True]).to_csv(sys.stdout,index=False))    
+    print(merged[['tourney_id','tourney_date','tourney_name','loser_name','loser_rank', '8seedrank']].sort_values(['tourney_date'], ascending=[True]).to_csv(sys.stdout,index=False))    
  
 def fedR4WimbiTime(atpmatches):
     """shows the time federer spent on court until 4th rounds in wimbledon"""
@@ -423,7 +501,7 @@ def youngFutures(matches):
     """finds young futures players
     set round and age parameter in next line"""
     matches = matches[(matches['round'] == 'QF') & (matches['winner_age'] < 16)]
-    matches = matches.sort(['winner_age'], ascending=True)
+    matches = matches.sort_values(['winner_age'], ascending=True)
     print(matches[['tourney_name','tourney_date','winner_name', 'winner_age', 'loser_name']].to_csv(sys.stdout,index=False))
     
 def rankofQhigherthanlastSeed(matches):
@@ -550,7 +628,7 @@ def rankingPointsOfYoungsters(players,ranks):
     join['points'] = join['points'].astype('int')
     join = join[(join['points'] > 5)]
     join = join.groupby('full_name', as_index=False).apply(lambda g: g.loc[g.age.idxmin()])
-    join = join.sort(['age'], ascending=False)
+    join = join.sort_values(['age'], ascending=False)
     print(join[['ranking_date','dob', 'points','rank','readAge',  'full_name', 'country']].to_csv(sys.stdout,index=False))
 
 def getLastSeedRankForGroupedTourneysDeprecated(groupedmatches):
@@ -766,7 +844,7 @@ def getBestQGrandSlamPlayer(qmatches,rankings):
         plist_df.columns = ['fullname']
         plist_df['entry_date'] = deadline_date
         merged = plist_df.merge(joinedrankingsdf, left_on=['fullname', 'entry_date'], right_on=['fullname', 'date'])
-        merged = merged.sort(['rank'], ascending=True)
+        merged = merged.sort_values(['rank'], ascending=True)
         #print(merged[['fullname', 'rank']].head(1))
         print(merged[['fullname', 'rank']].head(1).to_csv(sys.stdout, header=False, index=False))
         fullname = merged.head(1).iloc[[0]]['fullname'].values[0]
@@ -787,7 +865,7 @@ def getShortestFiveSetter(matches):
     define your own thresholds by changing the values in the line after the next."""
     matches['score'].astype('str')
     matches = matches[(matches['minutes'] < 150) & (matches['score'].str.count('-') == 5)]
-    matches = matches.sort(['minutes'], ascending=True)
+    matches = matches.sort_values(['minutes'], ascending=True)
     print(matches[['minutes','score','tourney_name','tourney_date','round','winner_name', 'loser_name']].to_csv(sys.stdout,index=False))   
     
 def getworstlda(matches):
@@ -840,7 +918,7 @@ def getworstlda(matches):
         plist_df.columns = ['fullname']
         plist_df['entry_date'] = deadline_date
         merged = plist_df.merge(joinedrankingsdf, left_on=['fullname', 'entry_date'], right_on=['fullname', 'date'])
-        merged = merged.sort(['rank'], ascending=False)
+        merged = merged.sort_values(['rank'], ascending=False)
         print(merged[['fullname', 'rank']].head(1).to_csv(sys.stdout, header=False, index=False))
         try: 
             fullname = merged.head(1).iloc[[0]]['fullname'].values[0]
@@ -892,7 +970,7 @@ def getRetsPerPlayer(atpmatches,qmatches,fmatches, activeplayers, active):
     merged = pd.concat([allmatcheslost_group,allmatchesret_group], axis=1, join = 'inner').reset_index().fillna(0)
     merged.columns = ['name', 'losses' , 'ret']
     merged['percentage'] =  (merged['ret'] * 100 / merged['losses']).round(2)
-    merged = merged.sort(['percentage','losses'], ascending=False)
+    merged = merged.sort_values(['percentage','losses'], ascending=False)
     
     
     if (active):
@@ -909,7 +987,7 @@ def youngestChallengerWinners(matches):
     print(type(matches_grouped['winner_rank'][0]))
     matches_grouped['loser_rank'] = matches_grouped['loser_rank'].fillna(0.0).astype('int')
     matches_grouped['winner_rank'] = matches_grouped['winner_rank'].fillna(0.0).astype('int')
-    print(matches_grouped[['tourney_date','tourney_name','winner_name','winner_age', 'winner_rank', 'loser_name', 'loser_rank', 'loser_entry']].sort(['winner_age'], ascending=[True]).to_csv(sys.stdout,index=False, sep='\t'))    
+    print(matches_grouped[['tourney_date','tourney_name','winner_name','winner_age', 'winner_rank', 'loser_name', 'loser_rank', 'loser_entry']].sort_values(['winner_age'], ascending=[True]).to_csv(sys.stdout,index=False, sep='\t'))    
     
 def getStreaks(atpmatches):
     """detects streaks in players' careers.
@@ -951,7 +1029,7 @@ def getStreaks(atpmatches):
         playerFullName = player
         matches = atpmatches[((atpmatches['winner_name'] == playerFullName) | (atpmatches['loser_name'] == playerFullName))]
         matches['round'] = pd.Categorical(matches['round'], categories = ["RR", "R128", "R64", "R32", "R16", "QF", "SF", "F", "W"])
-        matches = matches.sort(['tourney_date', 'round'])
+        matches = matches.sort_values(['tourney_date', 'round'])
                 
         wins_cnt=0
         streak = 0
@@ -1002,9 +1080,9 @@ def getStreaks(atpmatches):
     streaks = [[row[0],row[1],9999 if math.isnan(row[2]) else int(row[2]),row[3],row[4]] for row in streaks]
 
     #sort by date first because it's secondary sort index
-    streaks.sort(key=itemgetter(1),reverse=True)
+    streaks.sort_values(key=itemgetter(1),reverse=True)
     #sort by streak length
-    streaks.sort(key=itemgetter(3),reverse=True)   
+    streaks.sort_values(key=itemgetter(3),reverse=True)   
     streaks = [y for y in streaks if int(y[2]) <= MAX_RANK]
     for streak in streaks:
         print(streak[0]+','+str(streak[1])+','+str(streak[2])+','+str(streak[3])+','+str(streak[4]))
@@ -1087,7 +1165,7 @@ def highestRankedAustriansInR16(matches):
     bmatches = matches[(matches['tourney_level'] == 'A') & (matches['round'] =='R64') & (matches['winner_ioc'] =='AUT') & (matches['winner_rank'] > 300) & ((matches['draw_size'] == 56) | (matches['draw_size'] == 48) | (matches['draw_size'] == 64))]
     mergelist = [smatches, bmatches]
     matches = pd.concat(mergelist)
-    matches = matches.sort(['winner_rank'], ascending=False)
+    matches = matches.sort_values(['winner_rank'], ascending=False)
     print(matches[['tourney_name','tourney_date','winner_name', 'winner_rank', 'loser_name', 'loser_rank', 'loser_entry']].to_csv(sys.stdout,index=False))
     
 def mostRetsInTourneyPerPlayer(matches):
@@ -1119,7 +1197,7 @@ def mostWCs(matches):
 #     scores['matches'] = scores['wins']+scores['losses']
 #     scores['percentage'] = np.round((scores['rets'] * 100 / scores['wins']).astype(np.double), decimals=2)
 #     scores = scores.reindex_axis(['matches', 'wins','losses','rets','percentage'], axis=1)
-#     scores = scores.sort(['rets'], ascending=False)
+#     scores = scores.sort_values(['rets'], ascending=False)
     print(scores.to_csv(sys.stdout,index=True))
     
    
@@ -1143,7 +1221,7 @@ def mostRetsPerYear(matches):
     scores['matches'] = scores['wins']+scores['losses']
     scores['percentage'] = np.round((scores['rets'] * 100 / scores['wins']).astype(np.double), decimals=2)
     scores = scores.reindex_axis(['matches', 'wins','losses','rets','percentage'], axis=1)
-    scores = scores.sort(['rets'], ascending=False)
+    scores = scores.sort_values(['rets'], ascending=False)
     print(scores.to_csv(sys.stdout,index=True))
     
     
@@ -1154,7 +1232,7 @@ def oldestWinnerATP(atpmatches,qmatches):
     matches = matches[(matches['tourney_level'] == 'A') | (matches['tourney_level'] == 'Q') | (matches['tourney_level'] == 'M')  | (matches['tourney_level'] == 'G')]
     matches = matches[(matches['winner_age']) > 38]
     #matches = matches[(matches['tourney_date']) > 19903000]
-    matches = matches.sort(['winner_age'], ascending=False)
+    matches = matches.sort_values(['winner_age'], ascending=False)
     print(matches[['tourney_name', 'tourney_date', 'round', 'winner_name', 'winner_age', 'loser_name', 'score']].drop_duplicates().to_csv(sys.stdout,index=False))
     
     
@@ -1170,7 +1248,7 @@ def bestNonChampion(players,ranks):
     
     #join['tournament_wins'] = join.apply(lambda x: len(matches[(matches['tourney_date'] < x['ranking_date']) & (matches['winner_name'] == x['fullname'])]), axis=1)
     join = join.groupby('fullname').apply(get_date_wins) #groupby to increase speed compared to previous line
-    join = join[(join['tournament_wins'] == 0)].sort(['rank'], ascending=True)
+    join = join[(join['tournament_wins'] == 0)].sort_values(['rank'], ascending=True)
     print(join[['fullname', 'ranking_date', 'rank', 'tournament_wins']].to_csv(sys.stdout,index=False))
     
 def getZeroBreakPointChampions(atpmatches):
@@ -1181,7 +1259,7 @@ def getZeroBreakPointChampions(atpmatches):
     matches = matches.reset_index().groupby('tourney_id').apply(get_winner_name)
     matches = matches[(matches['winner_name'] == matches['twname'])]
     matches['sum_broken'] = matches.groupby('tourney_id')['w_broken'].transform(np.sum)
-    matches = matches.sort(['sum_broken','tourney_date'], ascending=[True,False])
+    matches = matches.sort_values(['sum_broken','tourney_date'], ascending=[True,False])
     print(matches[['tourney_id', 'tourney_name', 'tourney_level', 'winner_name', 'sum_broken']].drop_duplicates().to_csv(sys.stdout,index=False))
 
     
@@ -1207,7 +1285,7 @@ def easiestOpponents(atpmatches):
     matches = matches.groupby(['tourney_date','winner_name']).filter(lambda x: len(x) > 3)
     matches['ranksum'] = matches.groupby(['tourney_date','winner_name'])['loser_rank'].transform(lambda x: x.sum())
     matches = matches[(matches['ranksum'] > 450)]
-    matches = matches.sort(['tourney_date','winner_name'], ascending=True)
+    matches = matches.sort_values(['tourney_date','winner_name'], ascending=True)
     print(matches[['tourney_name','tourney_date','winner_name', 'round', 'loser_name', 'loser_rank', 'loser_entry', 'ranksum']].drop_duplicates().to_csv(sys.stdout,index=False))
     
 
@@ -1255,12 +1333,12 @@ def get_streaks2(df):
 def consecutivlosseswithoutbreaks(atpmatches):
     """finds matches where players had consecutive losses without getting broken"""
     #atpmatches = atpmatches[(atpmatches['loser_name'] == 'John Isner')]
-    atpmatches = atpmatches.sort('tourney_date')
+    atpmatches = atpmatches.sort_values('tourney_date')
     atpmatches['l_breaks'] = atpmatches['l_bpFaced']-atpmatches['l_bpSaved']
     atpmatches['streak'] = 0
     atpmatches = atpmatches.groupby('loser_name').apply(get_streaks2)
     atpmatches = atpmatches[(atpmatches['streak'] >1)]
-    atpmatches = atpmatches.sort('tourney_date')
+    atpmatches = atpmatches.sort_values('tourney_date')
     print(atpmatches[['tourney_date', 'tourney_name','winner_name', 'loser_name', 'score', 'l_bpSaved', 'l_bpFaced', 'streak']].to_csv(sys.stdout,index=False))
     
 def curse(row):
@@ -1278,7 +1356,7 @@ def curse(row):
 def findnadals(group):
     """helper function"""
     #print(group.iloc[[0]]['tourney_date'].values[0])
-    group = group.sort('rank')
+    group = group.sort_values('rank')
     group['previous_loser'] = group['loser_name'].shift(1)
     group['previous_winner'] = group['winner_name'].shift(1)
     group = group[(group['winner_name'] == 'Rafael Nadal') | (group['loser_name'] == 'Rafael Nadal') | (group['previous_loser'] == 'Rafael Nadal')]
@@ -1320,7 +1398,7 @@ def losetonadalafterwin(atpmatches):
     #namelist = ['Borna Coric', 'Steve Darcis']
     
     atpmatches['rank'] = atpmatches['round'].map(round_dict)
-    atpmatches = atpmatches.sort('tourney_date')
+    atpmatches = atpmatches.sort_values('tourney_date')
     
     #get list of nadal tournaments
     nadal_tourneys = atpmatches[(atpmatches['winner_name'] == 'Rafael Nadal') | (atpmatches['loser_name'] == 'Rafael Nadal')]['tourney_id']
@@ -1334,7 +1412,7 @@ def losetonadalafterwin(atpmatches):
         resultmatches = resultmatches.append(matches)
         
     resultmatches['curse'] = resultmatches['curse'].astype(int)
-    resultmatches = resultmatches.sort(['tourney_date', 'rank'], ascending=[True,True])
+    resultmatches = resultmatches.sort_values(['tourney_date', 'rank'], ascending=[True,True])
     print(resultmatches[['tourney_date', 'tourney_name', 'round', 'winner_name', 'loser_name', 'previous_loser', 'curse', 'score']].drop_duplicates().to_csv(sys.stdout,index=False))
     print(resultmatches[['tourney_date', 'tourney_name', 'round', 'winner_name', 'loser_name', 'curse', 'score']].drop_duplicates().to_csv(sys.stdout,index=False))
     
@@ -1370,7 +1448,7 @@ def createOpponent2Col(x,name):
      
 def lossStreaks(group):
     """helper function"""
-    group = group.sort('tourney_date')
+    group = group.sort_values('tourney_date')
     group['streak2'] = (group['opponent_loss'] == 0).cumsum()
     group['cumsum'] = np.nan
     group.loc[group['opponent_loss'] == 1, 'cumsum'] = group['streak2']
@@ -1436,7 +1514,7 @@ def tryingtodefend(group):
         #print(group.iloc[[0]]['tourney_name'])
         #print(len(group))
         #print('----')
-        group = group.sort('tourney_date', ascending=True)
+        group = group.sort_values('tourney_date', ascending=True)
         group_copy = group[(group['round'] == 'F')]
         #get new/old year
         newer_year = str(group_copy.iloc[[len(group_copy)-1]]['tourney_date'].values[0])[:4]
@@ -1510,7 +1588,7 @@ def defending(group):
     #print(group.iloc[[0]]['tourney_name'])
     #print(len(group))
     print('----')
-    group = group.sort('tourney_date', ascending=True)
+    group = group.sort_values('tourney_date', ascending=True)
     group['prev_winner_winner'] = group['winner_name'].shift()
     group['prev_winner_runnerup'] = group['loser_name'].shift()
     group['deftitle'] = group.apply(f, axis=1)
@@ -1613,7 +1691,7 @@ def bestNeverQFWin(matches, rankings,activeplayers):
     """finds players who never won a QF (+ streaks)"""
     #matches = matches[matches['tourney_date'] >  datetime.date(2012,12,29)]
     qfmatches = matches[(matches['round']=='QF')]
-    qfmatches = qfmatches.sort_values(by='tourney_date')
+    qfmatches = qfmatches.sort_values_values(by='tourney_date')
     qfgmatches = qfmatches.groupby('winner_name').first().reset_index()
     
     #print(len(matches))
@@ -1630,7 +1708,7 @@ def bestNeverQFWin(matches, rankings,activeplayers):
     playersdf = pd.read_csv(playersDB,index_col=None,header=None,encoding = "ISO-8859-1")
     playersdf.columns = ['id', 'fname', 'lname','hand','dob','country']
     playersdf["fullname"] = playersdf["fname"] + ' ' + playersdf["lname"]
-    playersdf = playersdf.sort_values(by='fullname')
+    playersdf = playersdf.sort_values_values(by='fullname')
     
     qfstreaks = pd.DataFrame()
     
@@ -1662,7 +1740,7 @@ def bestNeverQFWin(matches, rankings,activeplayers):
             qfmatchesplayer=qfmatchesplayer[qfmatchesplayer['streak']==1]
             qfstreaks = qfstreaks.append(qfmatchesplayer)
             #print(qfmatchesplayer[['player','winner_name', 'loser_name','streak']].to_csv(sys.stdout,index=False))
-    counts_df = pd.DataFrame(qfstreaks.groupby('player').size().sort_values().rename('counts'))
+    counts_df = pd.DataFrame(qfstreaks.groupby('player').size().sort_values_values().rename('counts'))
     
     print(counts_df)
             
@@ -1694,7 +1772,7 @@ def bestNeverQFWin(matches, rankings,activeplayers):
     qfmatches = matches[(matches['round']=='QF')]
     qfwinners = set(qfmatches['winner_name'])
     qfmatches = qfmatches.groupby('loser_name').filter(lambda g: (len(g[(~g['loser_name'].isin(qfwinners))]) > 0))
-    counts_df = pd.DataFrame(qfmatches.groupby('loser_name').size().sort_values().rename('counts'))
+    counts_df = pd.DataFrame(qfmatches.groupby('loser_name').size().sort_values_values().rename('counts'))
  
     for index, match in counts_df.iterrows():
         name = match.name
@@ -1722,7 +1800,7 @@ def listAllTimeNoQFWins(matches):
     qfmatches = matches[(matches['round']=='QF')]
     qfwinners = set(qfmatches['winner_name'])
     qfmatches = qfmatches.groupby('loser_name').filter(lambda g: (len(g[(~g['loser_name'].isin(qfwinners))]) > 0))
-    counts = qfmatches.groupby('loser_name').size().sort_values()
+    counts = qfmatches.groupby('loser_name').size().sort_values_values()
     print(counts)
     
 def setstats(atpmatches):
@@ -1856,7 +1934,7 @@ def getTop100ChallengerPlayersPerWeek(qmatches):
     matches['top100'] = matches.apply(top100, axis=1)
     matches['count'] = matches.groupby(['tourney_date'])['top100'].transform(lambda x: x.sum())
     matches['tcount'] = matches.groupby(['tourney_date'])['tourney_name'].transform(lambda x: x.nunique())
-    matches = matches.sort(['count'], ascending=False)
+    matches = matches.sort_values(['count'], ascending=False)
     print(matches[['tourney_date', 'count','tcount']].drop_duplicates().to_csv(sys.stdout,index=False))
     #print(matches['top100'].head())
 
@@ -1884,14 +1962,14 @@ def titles(matches):
     matches = matches[(matches['round'] == 'F')]
     matches['titles'] = matches.groupby('winner_name')['winner_name'].transform('count')
     matches = matches[(matches['titles'] > 15)]
-    matches = matches.sort(['titles'], ascending=False)
+    matches = matches.sort_values(['titles'], ascending=False)
     print(matches[['winner_name', 'titles']].drop_duplicates().to_csv(sys.stdout,index=False))
     
 
 def lowestRankedTitlists(matches):
     """finds the lowest ranked titlists"""
     matches = matches[(matches['tourney_level'] == 'C') & (matches['round'] == 'F') & (matches['winner_rank'] > 600)]
-    matches = matches.sort(['tourney_date'], ascending=False)
+    matches = matches.sort_values(['tourney_date'], ascending=False)
     matches['winner_rank'] = matches['winner_rank'].astype('int')
     matches['winner_age'] = matches['winner_age'].round(2)
     print(matches[['tourney_date', 'tourney_name', 'winner_name', 'winner_rank', 'winner_age']].to_csv(sys.stdout,index=False))
@@ -1921,7 +1999,7 @@ def gamesconcededpertitle(matches):
     matches['rets_t'] = matches['rets_t'].astype('int')
     
     
-    matches = matches.sort(['games_lost_t'], ascending=True)
+    matches = matches.sort_values(['games_lost_t'], ascending=True)
     print(matches[['tourney_id', 'winner_name', 'wcnt','games_won_t','games_lost_t','rets_t']].drop_duplicates().to_csv(sys.stdout,index=False))
     
     
@@ -1956,7 +2034,7 @@ def analyzeSetsFutures(row):
 def lastTimeGrandSlamCountry(atpmatches):
     """grand slam results per country"""
     matches=atpmatches[(atpmatches['tourney_level'] == 'G') & ((atpmatches['winner_ioc'] == 'NOR') | (atpmatches['loser_ioc'] == 'NOR'))]
-    matches = matches.sort(['tourney_date'], ascending=True)
+    matches = matches.sort_values(['tourney_date'], ascending=True)
     print(matches[['tourney_date','tourney_name', 'round', 'winner_name', 'loser_name']].to_csv(sys.stdout,index=False))
     
 def countunder21grandslam(atpmatches):
@@ -1970,7 +2048,7 @@ def countunder21grandslam(atpmatches):
     matches['players_under_21'] = matches['players_under_21'].astype('int')
     
     matches['player_names'] = matches['w_under_21_names'] + ',' + matches['l_under_21_names'] 
-    #matches = matches.sort(['players_under_21'], ascending=True)
+    #matches = matches.sort_values(['players_under_21'], ascending=True)
     print(matches[['tourney_id','tourney_name', 'player_names','players_under_21']].drop_duplicates().to_csv(sys.stdout,index=False))
     #print(matches[['tourney_date','tourney_name','players_under_21']].drop_duplicates().to_csv(sys.stdout,index=False))
     
@@ -2013,7 +2091,7 @@ def mostPlayersInTop100OfCountry(rankings):
     joinedrankingsdf=joinedrankingsdf[(joinedrankingsdf['auts'] > 3) &  (joinedrankingsdf['country'] == 'AUT')]
     joinedrankingsdf = joinedrankingsdf.reset_index().groupby(['date']).apply(concatranknames)
 
-    joinedrankingsdf = joinedrankingsdf.sort(['date'], ascending=True)
+    joinedrankingsdf = joinedrankingsdf.sort_values(['date'], ascending=True)
     print(joinedrankingsdf[['date', 'country','autnames']].to_csv(sys.stdout,index=False))
     
 def concatranknames(group):
@@ -2081,7 +2159,7 @@ def findLLwhoWOdinQ(atpmatches,qmatches):
                 resultlist.append(second_case_results)
     
            
-    result = pd.concat(resultlist).sort(['tourney_date'], ascending=False)
+    result = pd.concat(resultlist).sort_values(['tourney_date'], ascending=False)
     print(result[['tourney_name','tourney_date','round','winner_name','winner_entry', 'loser_name','loser_entry','score']].to_csv(sys.stdout,index=False))
     
 def highestRanked500finalist(atpmatches):
@@ -2106,7 +2184,7 @@ def highestRanked500finalist(atpmatches):
     matches500l['result'] = 'L'
     matches500l.columns = ['tourney_date', 'tourney_name','round','player_name','player_rank','result']
     final_dfs = [matches500w, matches500l]
-    final = pd.concat(final_dfs).sort(['player_rank'], ascending=False)
+    final = pd.concat(final_dfs).sort_values(['player_rank'], ascending=False)
     final['player_rank'] = final['player_rank'].astype(int)
     print(final[['tourney_date', 'tourney_name','player_name','player_rank','result']].to_csv(sys.stdout,index=False,sep= '-'))
 
@@ -2237,7 +2315,7 @@ def findSmallestQDraws(qmatches):
     
     matches = qmatches[(qmatches['tourney_id'].isin(tourneyids))]
     matches = matches.reset_index().groupby('tourney_id').apply(myfunc)
-    matches = matches.sort('player_sums', ascending=True)
+    matches = matches.sort_values('player_sums', ascending=True)
     print(matches[['tourney_id', 'tourney_name','player_sums']].drop_duplicates().to_csv(sys.stdout,index=False))
 
 def myfunc(group):
@@ -2265,7 +2343,7 @@ def youngestCombinedAge(atpmatches,qmatches,fmatches):
     allmatches['winner_age'] = allmatches['winner_age'].round(1)
     allmatches['loser_age'] = allmatches['loser_age'].round(1)
     allmatches['agecombined'] = allmatches['agecombined'].round(1)
-    allmatches = allmatches.sort('agecombined', ascending=True)
+    allmatches = allmatches.sort_values('agecombined', ascending=True)
     print(allmatches[['tourney_id', 'tourney_name','winner_name', 'winner_age', 'loser_name', 'loser_age' , 'agecombined']].to_csv(sys.stdout,index=False))
     
 
@@ -2276,11 +2354,12 @@ rankdict = collections.defaultdict(dict)
 joinedrankingsdf = pd.DataFrame()
 #reading ATP level matches. The argument defines the path to the match files.
 #since the match files are in the parent directory we provide ".." as an argument
-#atpmatches = readATPMatches("..")
-atpmatches = readATPMatchesParseTime("..")
+root_dir = "/Users/ashwin_balakrishna/Desktop/git-repos/tennis_atp"
+atpmatches = readATPMatches(root_dir)
+# atpmatches = readATPMatchesParseTime("..")
 
 #reading Challenger + ATP Q matches
-#qmatches = readChall_QATPMatches("..")
+qmatches = readChall_QATPMatches(root_dir)
 #qmatches = readChall_QATPMatchesParseTime("..")
 #fmatches = readFMatches("..")
 #fmatches = readFMatchesParseTime("..")
@@ -2288,9 +2367,10 @@ atpmatches = readATPMatchesParseTime("..")
 
 #the following lines make use of methods defined above this file. just remove the hash to uncomment the line and use the method.
 #matchesPerCountryAndRound(matches)
-#findLLQmultipleMatchesAtSameTournament(atpmatches,qmatches)
-#bestLLinGrandSlams(atpmatches)
-#numberOfSetsLongerThan(atpmatches,2,130)
+# findLLQmultipleMatchesAtSameTournament(atpmatches,qmatches)
+get_slams_with_diff_bo3_winners(atpmatches)
+get_percent_of_grand_slam_matches_with_diff_bo3_winners(atpmatches)
+# numberOfSetsLongerThan(atpmatches,2,130)
 #geth2hforplayerswrapper(atpmatches,qmatches)
 #getwnonh2hs(atpmatches,qmatches,rankings)
 #getTop100ChallengerPlayersPerWeek(qmatches)
@@ -2354,4 +2434,4 @@ atpmatches = readATPMatchesParseTime("..")
 #percentagOfQWinners(qmatches)
 #findSmallestQDraws(qmatches)
 #youngestCombinedAge(atpmatches,fmatches,qmatches)
-highestRanked500finalist(atpmatches)
+# highestRanked500finalist(atpmatches)
